@@ -21,6 +21,16 @@ type SavedConversation = {
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
+type TranscriptLanguage = "original" | "english" | "hindi";
+
+function languageButtonClass(active: boolean) {
+  return `rounded-md px-2.5 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
+    active
+      ? "bg-emerald-500/20 text-emerald-300"
+      : "text-slate-400 hover:bg-white/5 hover:text-slate-200"
+  }`;
+}
+
 function formatDate(value: string) {
   return `${new Date(value).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
@@ -44,10 +54,87 @@ export default function Transcription({
   const [saveMessage, setSaveMessage] = useState("");
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState("");
+  const [viewLanguage, setViewLanguage] =
+    useState<TranscriptLanguage>("original");
+  const [translation, setTranslation] = useState("");
+  const [isTranslating, setIsTranslating] = useState(false);
+  const [translationError, setTranslationError] = useState("");
 
-  const sessionRef = useRef<any>(null);
+  const sessionRef = useRef<{ close: () => void } | null>(null);
   const streamerRef = useRef<AudioStreamer | null>(null);
+  const translationRequestRef = useRef(0);
 
+  function showOriginal() {
+    translationRequestRef.current += 1;
+    setViewLanguage("original");
+    setTranslation("");
+    setTranslationError("");
+    setIsTranslating(false);
+  }
+
+  async function translateTranscript(
+    target: Exclude<TranscriptLanguage, "original">
+  ) {
+    const text = `${transcript}${interimText}`.trim();
+
+    if (!text) {
+      return;
+    }
+
+    const requestId = translationRequestRef.current + 1;
+    translationRequestRef.current = requestId;
+
+    setViewLanguage(target);
+    setTranslation("");
+    setTranslationError("");
+    setIsTranslating(true);
+
+    try {
+      const response = await fetch("/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, target }),
+      });
+
+      if (response.status === 401) {
+        await signOut({ callbackUrl: "/login" });
+        return;
+      }
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(data?.error ?? "Could not translate the transcript.");
+      }
+
+      if (translationRequestRef.current !== requestId) {
+        return;
+      }
+
+      if (typeof data?.translation !== "string" || !data.translation.trim()) {
+        throw new Error("Could not translate the transcript.");
+      }
+
+      setTranslation(data.translation);
+    } catch (err) {
+      if (translationRequestRef.current !== requestId) {
+        return;
+      }
+
+      setViewLanguage("original");
+      setTranslationError(
+        err instanceof Error
+          ? err.message
+          : "Could not translate the transcript."
+      );
+    } finally {
+      if (translationRequestRef.current === requestId) {
+        setIsTranslating(false);
+      }
+    }
+  }
+
+  // Translations are view-only. This always saves the original microphone text.
   async function saveTranscript(text: string) {
     setSaveState("saving");
     setSaveMessage("Saving to your account...");
@@ -120,6 +207,7 @@ export default function Transcription({
       setInterimText("");
       setSaveState("idle");
       setSaveMessage("");
+      showOriginal();
 
       // 1. Get ephemeral token from our backend
       const tokenResponse = await fetch("/api/gemini-token", {
@@ -311,26 +399,81 @@ export default function Transcription({
 
       {/* Transcription */}
       <div className="min-h-64 w-full max-w-2xl rounded-xl border border-white/10 bg-white/[0.03] p-6">
-        <div className="mb-4 flex items-center justify-between gap-4">
-          <h2 className="text-xl font-bold text-white">Live Transcription</h2>
-          {isRecording && (
-            <span className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-red-400">
-              <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
-              Recording
-            </span>
-          )}
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <h2 className="text-xl font-bold text-white">Live Transcription</h2>
+            {isRecording && (
+              <span className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-red-400">
+                <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
+                Recording
+              </span>
+            )}
+          </div>
+
+          <div
+            role="group"
+            aria-label="Transcript language"
+            className="flex items-center gap-1 rounded-lg border border-white/10 bg-white/[0.03] p-1"
+          >
+            <button
+              type="button"
+              onClick={showOriginal}
+              aria-pressed={viewLanguage === "original"}
+              className={languageButtonClass(viewLanguage === "original")}
+            >
+              Original
+            </button>
+            <button
+              type="button"
+              onClick={() => translateTranscript("english")}
+              disabled={!savedText}
+              aria-pressed={viewLanguage === "english"}
+              className={languageButtonClass(viewLanguage === "english")}
+            >
+              English
+            </button>
+            <button
+              type="button"
+              onClick={() => translateTranscript("hindi")}
+              disabled={!savedText}
+              aria-pressed={viewLanguage === "hindi"}
+              className={languageButtonClass(viewLanguage === "hindi")}
+            >
+              Hindi
+            </button>
+          </div>
         </div>
 
-        <p className="whitespace-pre-wrap leading-7">
-          {transcript}
+        {viewLanguage !== "original" ? (
+          isTranslating ? (
+            <p className="text-slate-500">Translating...</p>
+          ) : (
+            <p className="whitespace-pre-wrap leading-7">{translation}</p>
+          )
+        ) : (
+          <>
+            <p className="whitespace-pre-wrap leading-7">
+              {transcript}
+              <span className="text-slate-500">{interimText}</span>
+            </p>
 
-          <span className="text-slate-500">{interimText}</span>
-        </p>
+            {!transcript && !interimText && (
+              <p className="text-slate-500">
+                Your speech will appear here...
+              </p>
+            )}
+          </>
+        )}
 
-        {!transcript && !interimText && (
-          <p className="text-slate-500">
-            Your speech will appear here...
+        {viewLanguage !== "original" && !isTranslating && translation && (
+          <p className="mt-3 text-xs text-slate-500">
+            Translation is view-only. Your saved transcript keeps the original
+            words.
           </p>
+        )}
+
+        {translationError && (
+          <p className="mt-3 text-sm text-red-400">{translationError}</p>
         )}
 
         {saveMessage && (
